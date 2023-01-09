@@ -1,0 +1,275 @@
+#include "o3.h"
+#include "gpio.h"
+#include "systick.h"
+
+/**************************************************************************//**
+ * @brief Konverterer nummer til string 
+ * Konverterer et nummer mellom 0 og 99 til string
+ *****************************************************************************/
+void int_to_string(char *timestamp, unsigned int offset, int i) {
+    if (i > 99) {
+        timestamp[offset]   = '9';
+        timestamp[offset+1] = '9';
+        return;
+    }
+
+    while (i > 0) {
+	    if (i >= 10) {
+		    i -= 10;
+		    timestamp[offset]++;
+		
+	    } else {
+		    timestamp[offset+1] = '0' + i;
+		    i=0;
+	    }
+    }
+}
+
+/**************************************************************************//**
+ * @brief Konverterer 3 tall til en timestamp-string
+ * timestamp-argumentet må være et array med plass til (minst) 7 elementer.
+ * Det kan deklareres i funksjonen som kaller som "char timestamp[7];"
+ * Kallet blir dermed:
+ * char timestamp[7];
+ * time_to_string(timestamp, h, m, s);
+ *****************************************************************************/
+void time_to_string(char *timestamp, int h, int m, int s) {
+    timestamp[0] = '0';
+    timestamp[1] = '0';
+    timestamp[2] = '0';
+    timestamp[3] = '0';
+    timestamp[4] = '0';
+    timestamp[5] = '0';
+    timestamp[6] = '\0';
+
+    int_to_string(timestamp, 0, h);
+    int_to_string(timestamp, 2, m);
+    int_to_string(timestamp, 4, s);
+}
+//Port- og pin-nummer
+#define PB1_PORT GPIO_PORT_B
+#define PB1_PIN 9
+#define PB2_PORT GPIO_PORT_B
+#define PB2_PIN 10
+#define LED_PORT GPIO_PORT_E
+#define LED_PIN 2
+
+//Definerer state-konstanter
+#define STATE_SETSECONDS 0
+#define STATE_SETMINUTES 1
+#define STATE_SETHOURS 2
+#define STATE_COUNTDOWN 3
+#define STATE_ALARM 4
+
+
+/* Defines a set of port registers to be a struct gpio_port_map_t
+  which contains the port registers in exactly the same order as they are in memory.
+  Each port register is represented by a variable with the 32-bit data type word
+  and the volatile specifier (to make sure the value is actually written to memory): */
+typedef struct {
+  volatile word CTRL;
+  volatile word MODEL;
+  volatile word MODEH;
+  volatile word DOUT;
+  volatile word DOUTSET;
+  volatile word DOUTCLR;
+    volatile word DOUTTGL;
+    volatile word DIN;
+    volatile word PINLOCKN;
+} gpio_port_map_t;
+
+
+/* Similarly, we can create one struct to represent the GPIO in its entirety.
+  Defines gpio_map_t to be an array of type gpio_port_map_t with exactly 6 elements,
+  followed by all config registers with data type word: */
+struct gpio_map_t {
+  volatile gpio_port_map_t ports[6];
+  volatile word unused_space[10];
+  volatile word EXTIPSELL;
+  volatile word EXTIPSELH;
+  volatile word EXTIRISE;
+  volatile word EXTIFALL;
+  volatile word IEN;
+  volatile word IF;
+  volatile word IFS;
+  volatile word IFC;
+  volatile word ROUTE;
+  volatile word INSENSE;
+  volatile word LOCK;
+  volatile word CTRL;
+  volatile word CMD;
+  volatile word EM4WUEN;
+    volatile word EM4WUPOL;
+    volatile word EM4WUCAUSE;
+} *GPIO_MAP = (struct gpio_map_t*)GPIO_BASE;
+
+/* Must include the 10 unused registers between the port and config registers,
+otherwise the data type would not correspond to the physical positions of the registers.
+All the config registers in our model would then miss the physical registers with 10 words. */
+
+/*This can be mapped to memory by creating a pointer of type gpio_map_t that points to GPIO_BASE.
+The registers can then be accessed through the pointer in the normal way: */
+
+
+
+struct systick_t {
+  volatile word CTRL;
+  volatile word LOAD;
+  volatile word VAL;
+  volatile word CALIB;
+} *SYSTICK = (struct systick_t*)SYSTICK_BASE;
+
+int sekunder;
+int minutter;
+int timer;
+int tilstand;
+
+/* Starts the clock by loading FREQUENCY into VAL
+and set the Enable flag in the CTRL register to 1: */
+void startClock() {
+  SYSTICK->VAL = FREQUENCY;
+  SYSTICK->CTRL |= SysTick_CTRL_ENABLE_Msk;
+}
+
+/*Stops the clock by XORing the Enable mask and itself: */
+void stopClock() {
+    SYSTICK->CTRL = SYSTICK->CTRL ^ SysTick_CTRL_ENABLE_Msk;
+}
+/*function for seting the LED by using LED_PORT, LED_PIN, GPIO_MODE_OUTPUT*/
+void setLED(int tilstand){
+    GPIO_PinModeSet(LED_PORT, LED_PIN, GPIO_MODE_OUTPUT, tilstand);
+}
+/*function for increasing hours*/
+void incTimer() {
+    timer += 1;
+}
+
+/*function for increasing minutes*/
+void incMinutter() {
+    minutter += 1;
+    if (minutter >= 60) {
+        minutter = 0;
+        incTimer();
+    }
+}
+/*function for increasing seconds*/
+void incSekunder() {
+    sekunder += 1;
+    if (sekunder >= 60) {
+        sekunder = 0;
+        incMinutter();
+    }
+}
+/*function for updating the display LCD using lcd_write function*/
+void updateDisplayLCD(){
+    char stamp[8] = "0000000\0";
+    time_to_string(stamp, timer, minutter, sekunder);
+    lcd_write(stamp);
+}
+/*function for handling IRQ using seconds, minutes, hours*/
+void GPIO_ODD_IRQHandler() {
+  switch(tilstand) {
+    case STATE_SETSECONDS:
+      incSekunder();
+      updateDisplayLCD();
+      break;
+
+    case STATE_SETMINUTES:
+      incMinutter();
+      updateDisplayLCD();
+      break;
+
+    case STATE_SETHOURS:
+      incTimer();
+      updateDisplayLCD();
+      break;
+
+    default:
+      break;
+  }
+
+    GPIO_MAP->IFC = 1 << PB1_PIN;
+}
+/*function for handling IRQ using seconds, minutes, hours*/
+void GPIO_EVEN_IRQHandler() {
+  switch(tilstand) {
+    case STATE_SETSECONDS:
+      tilstand = STATE_SETMINUTES;
+      break;
+
+    case STATE_SETMINUTES:
+      tilstand = STATE_SETHOURS;
+      break;
+
+    case STATE_SETHOURS:
+      tilstand = STATE_COUNTDOWN;
+      startClock();
+      break;
+
+    case STATE_ALARM:
+      tilstand = STATE_SETSECONDS;
+      setLED(0);
+      break;
+
+    default:
+      break;
+  }
+
+  GPIO_MAP->IFC = 1 << PB2_PIN;
+}
+/*function for handling systick using seconds, minutes, hours and checking if they are equal to zero mor less*/
+void SysTick_Handler() {
+  if (tilstand == STATE_COUNTDOWN) {
+    if ((sekunder == 0) && (minutter == 0) && (timer == 0)) {
+      tilstand = STATE_ALARM;
+      setLED(1);
+      stopClock();
+      updateDisplayLCD();
+    }
+    else if ((sekunder <= 0) && (minutter <= 0)) {
+      --timer;
+      minutter = 60;
+    }
+    else if (sekunder <= 0) {
+      --minutter;
+      sekunder = 60;
+    }
+    --sekunder;
+    updateDisplayLCD();
+  }
+}
+/*function for setting up the variables and GPIO variables*/
+void setup(){
+    sekunder = 0;
+    minutter = 0;
+    timer = 0;
+    tilstand = 0;
+    GPIO_PinModeSet(4, 2, GPIO_MODE_OUTPUT, 0);
+    GPIO_PinModeSet(PB1_PORT, PB1_PIN, GPIO_MODE_INPUT, 1);
+    GPIO_PinModeSet(PB2_PORT, PB2_PIN, GPIO_MODE_INPUT, 1);
+  /*Setting GPIO MAP using the registeres and and the pins on the board */
+    GPIO_MAP->EXTIPSELH &= ~(16 << ((PB1_PIN-8) * 4));
+  /*Setting GPIO MAP using EXTIPSELH,the registeres and and the pins on the board */
+    GPIO_MAP->EXTIPSELH |= 1 << ((PB1_PIN-8) * 4);
+  /*Setting GPIO MAP using EXTIPSELH, the registeres and and the pins on the board */
+    GPIO_MAP->EXTIPSELH &= ~(16 << ((PB2_PIN-8) * 4));
+  /*Setting GPIO MAP using EXTIPSELH, the registeres and and the pins on the board */
+    GPIO_MAP->EXTIPSELH |= 1 << ((PB2_PIN-8) * 4);
+  /*Setting GPIO MAP using EXTIPSELH, the registeres and and the pins on the board */
+    GPIO_MAP->IEN |= 1 << PB1_PIN;
+  /*Setting GPIO MAP using IEN, the registeres and and the pins on the board */
+    GPIO_MAP->IEN |= 1 << PB2_PIN;
+  /*Setting GPIO MAP using EXITFALL, the registeres and and the pins on the board */
+    GPIO_MAP->EXTIFALL |= 1 << PB1_PIN;
+  /*Setting GPIO MAP using EXITFALL, the registeres and and the pins on the board */
+    GPIO_MAP->EXTIFALL |= 1 << PB2_PIN;
+    SYSTICK->LOAD = FREQUENCY;
+    SYSTICK->CTRL = SysTick_CTRL_CLKSOURCE_Msk | SysTick_CTRL_TICKINT_Msk;
+    updateDisplayLCD();
+}
+
+int main(void) {
+    init();
+    setup();
+    return 0;
+}
